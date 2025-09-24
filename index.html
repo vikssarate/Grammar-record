@@ -65,7 +65,7 @@ ul{padding:0;margin:0}.list{display:flex;flex-direction:column;gap:8px;max-heigh
 </head>
 <body>
 <header class="wrap">
-  <h1>GS-Record</h1>
+  <h1>Grammar-Record</h1>
   <div class="small">Intense → Week-Streak (3 days) → Spaced (1d×6,2d×6,3d×5,4d×4,8d×4,16d×3,28d×2) → Weekly (7d)</div>
   <button id="exportJson" class="btn alt">Export JSON</button>
   <label style="display:flex;gap:8px;align-items:center">
@@ -128,15 +128,15 @@ function addDaysYMD(ymd, n){
 function isPastOrToday(ymd){ return !ymd || ymd <= todayYMD(); }
 
 /* ===== STORAGE & CONFIG ===== */
-const LSK="mem_spaced_v11_altC";
+const LSK="mem_spaced_v11_altD";
 let DB=JSON.parse(localStorage.getItem(LSK)||'{"subjects":[]}');
 
 /* ===== NEW: COUCH CONFIG (no auth) ===== */
 const COUCH_BASE = 'https://couch.techstudy.me';
 const COUCH_DB   = 'record';
 const REMOTE_URL = `${COUCH_BASE}/${COUCH_DB}`;         // https://couch.techstudy.me/record
-const LOCAL_DB_NAME = 'mem-record2';
-const STATE_DOC_ID = 'mem_state_v3';                    // single state doc
+const LOCAL_DB_NAME = 'mem-record3';
+const STATE_DOC_ID = 'mem_state_v4';                    // single state doc
 
 const localDB  = new PouchDB(LOCAL_DB_NAME);
 const remoteDB = new PouchDB(REMOTE_URL, { skip_setup:true });
@@ -167,7 +167,7 @@ async function saveToPouch(){
     try{ doc = await localDB.get(STATE_DOC_ID); }
     catch(e){ if(e.status!==404) throw e; doc={_id:STATE_DOC_ID}; }
     doc.lsk = LSK;
-    doc.app = 'gs-record';
+    doc.app = 'grammar-record';
     doc.data = DB;
     doc.updatedAt = new Date().toISOString();
     await localDB.put(doc);
