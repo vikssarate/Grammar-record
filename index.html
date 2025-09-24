@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>General-ScienceLearningRecord App</title>
+<title>gs-record</title>
 <style>
 :root{--bg:#0f1220;--card:#181c2f;--ink:#eef1ff;--muted:#9aa3c7;--line:#2a3052;--ok:#7bd88f;--bad:#ff7575;--accent:#6ca8ff}
 *{box-sizing:border-box}
@@ -65,13 +65,16 @@ ul{padding:0;margin:0}.list{display:flex;flex-direction:column;gap:8px;max-heigh
 </head>
 <body>
 <header class="wrap">
-  <h1>General-ScienceLearningRecord App</h1>
+  <h1>GS-Record</h1>
   <div class="small">Intense → Week-Streak (3 days) → Spaced (1d×6,2d×6,3d×5,4d×4,8d×4,16d×3,28d×2) → Weekly (7d)</div>
   <button id="exportJson" class="btn alt">Export JSON</button>
   <label style="display:flex;gap:8px;align-items:center">
     <input id="importFile" type="file" accept="application/json"/>
     <span class="small">Import JSON</span>
   </label>
+  <!-- NEW: Sync / Pull buttons -->
+  <button id="syncNow" class="btn">Sync</button>
+  <button id="pullNow" class="btn alt">Pull</button>
 </header>
 
 <!-- NEW: Due Today strip -->
@@ -108,6 +111,9 @@ ul{padding:0;margin:0}.list{display:flex;flex-direction:column;gap:8px;max-heigh
 
 <footer class="wrap small">Calendar-day scheduling: next due is midnight <b>local time (IST)</b> of the due day.</footer>
 
+<!-- NEW: PouchDB -->
+<script src="https://cdn.jsdelivr.net/npm/pouchdb@7.3.1/dist/pouchdb.min.js"></script>
+
 <script>
 /* ===== IST (New Delhi) DATE HELPERS ===== */
 const TZ="Asia/Kolkata";
@@ -122,9 +128,18 @@ function addDaysYMD(ymd, n){
 function isPastOrToday(ymd){ return !ymd || ymd <= todayYMD(); }
 
 /* ===== STORAGE & CONFIG ===== */
-/* CHANGED: new localStorage key to avoid collision */
-const LSK="mem_spaced_v11_altgs"; // was mem_spaced_v11_altC
+const LSK="mem_spaced_v11_altC";
 let DB=JSON.parse(localStorage.getItem(LSK)||'{"subjects":[]}');
+
+/* ===== NEW: COUCH CONFIG (no auth) ===== */
+const COUCH_BASE = 'https://couch.techstudy.me';
+const COUCH_DB   = 'record';
+const REMOTE_URL = `${COUCH_BASE}/${COUCH_DB}`;         // https://couch.techstudy.me/record
+const LOCAL_DB_NAME = 'mem-record2';
+const STATE_DOC_ID = 'mem_state_v3';                    // single state doc
+
+const localDB  = new PouchDB(LOCAL_DB_NAME);
+const remoteDB = new PouchDB(REMOTE_URL, { skip_setup:true });
 
 /* UI expand/collapse state (not exported) */
 const UI = { sub: new Map(), topic: new Map(), current: {subId:null, topicId:null, chunkId:null} };
@@ -134,7 +149,73 @@ const PERPETUAL_GAP=7;
 const TOTAL_SPACED_REPS = SCHEDULE_GROUPS.reduce((a,g)=>a+g.reps,0);
 
 /* ===== SAVE & RENDER ===== */
-function save(){localStorage.setItem(LSK,JSON.stringify(DB)); renderAll();}
+function save(){localStorage.setItem(LSK,JSON.stringify(DB)); renderAll(); saveToPouchDebounced();}
+function renderAll(){ 
+  todayDateEl.textContent=`— ${todayYMD()}`; 
+  renderDueBar();
+  renderSubjects(); 
+  renderToday(); 
+}
+
+/* ===== NEW: Pouch bridge (live) ===== */
+let writingToPouch=false, applyingRemote=false;
+
+async function saveToPouch(){
+  try{
+    writingToPouch = true;
+    let doc;
+    try{ doc = await localDB.get(STATE_DOC_ID); }
+    catch(e){ if(e.status!==404) throw e; doc={_id:STATE_DOC_ID}; }
+    doc.lsk = LSK;
+    doc.app = 'gs-record';
+    doc.data = DB;
+    doc.updatedAt = new Date().toISOString();
+    await localDB.put(doc);
+    // push just this doc quickly (in addition to live sync)
+    await PouchDB.replicate(localDB, remoteDB, { doc_ids:[STATE_DOC_ID] });
+  }catch(e){ console.error('saveToPouch', e); }
+  finally{ writingToPouch=false; }
+}
+
+let tDeb=null;
+function saveToPouchDebounced(){ clearTimeout(tDeb); tDeb=setTimeout(saveToPouch,300); }
+
+async function applyDocToApp(doc){
+  if(!doc || !doc.data) return;
+  applyingRemote = true;
+  DB = doc.data;
+  localStorage.setItem(LSK, JSON.stringify(DB));
+  renderAll();
+  applyingRemote = false;
+}
+
+/* Remote-first bootstrap so a fresh browser (after clearing data) restores itself */
+async function bootstrapRemoteFirst(){
+  try{
+    // pull the state doc from remote into local
+    await PouchDB.replicate(remoteDB, localDB, { doc_ids:[STATE_DOC_ID] });
+    const got = await localDB.get(STATE_DOC_ID).catch(e=>null);
+    if(got && got.data){ await applyDocToApp(got); return; }
+  }catch(e){ console.warn('bootstrap pull failed (will seed if needed):', e); }
+
+  // If nothing pulled and localStorage already has data, seed remote with it
+  if((DB?.subjects||[]).length){
+    await saveToPouch();
+  }
+}
+
+/* Start continuous two-way sync and watch for changes to our state doc */
+function startLiveSync(){
+  PouchDB.sync(localDB, remoteDB, { live:true, retry:true })
+    .on('error', err => console.error('sync error', err));
+
+  localDB.changes({ since:'now', live:true, include_docs:true, doc_ids:[STATE_DOC_ID] })
+    .on('change', ch => {
+      if(writingToPouch || applyingRemote) return;
+      if(ch.doc && ch.doc.data){ applyDocToApp(ch.doc); }
+    })
+    .on('error', err => console.error('changes error', err));
+}
 
 /* ===== MODELS ===== */
 function createSubject(name){return{id:crypto.randomUUID(),name,topics:[]};}
@@ -200,35 +281,8 @@ function spacedRepsDoneCount(ch){
   if(cur) done+=Math.min(ch.spaced.repsDoneInGroup, cur.reps);
   return done;
 }
-function renderCycleFooterHTML(ch){
-  const intenseDays=["day1","day2","day3"].reduce((n,k)=>n+(ch.intense[k].every(Boolean)?1:0),0);
-  const week= Math.min(ch.weekStreak?.streak||0,3);
-  const spaced= spacedRepsDoneCount(ch);
-  const total = 3 + 3 + SCHEDULE_GROUPS.reduce((a,g)=>a+g.reps,0);
-  const pct = Math.round(((intenseDays + week + spaced)/total)*100);
-  return `
-    <div class="prog">
-      <div class="line"><div class="bar" style="width:${pct}%"></div></div>
-      <div class="labels">
-        <span><b>${pct}%</b> of full cycle</span>
-        <span>Intense ${intenseDays}/3</span>
-        <span>Week-streak ${week}/3</span>
-        <span>Spaced ${spaced}/${total-6}</span>
-        <span>Weekly repeats forever</span>
-      </div>
-    </div>
-  `;
-}
 
 /* ===== RENDER ===== */
-function renderAll(){ 
-  todayDateEl.textContent=`— ${todayYMD()}`; 
-  renderDueBar();              // NEW
-  renderSubjects(); 
-  renderToday(); 
-}
-
-/* ===== NEW: Top Due strip ===== */
 function renderDueBar(){
   const rows=collectDue();
   dueBar.innerHTML = '<span class="title">Due Today:</span>';
@@ -269,9 +323,8 @@ function renderDueBar(){
       if(C.phase==="week_streak") doWeekStreakReview(C);
       else if(C.phase==="spaced") doSpacedReview(C);
       else if(C.phase==="weekly") doWeeklyReview(C);
-      save(); // re-renders strip + tables
+      save(); // re-render + push
     }else{
-      // just jump to the chunk
       UI.current={subId:sid, topicId:tid, chunkId:cid};
       openTopic(sid,tid,cid);
     }
@@ -448,7 +501,6 @@ function openTopic(subId,topicId,highlightChunkId=null){
     container.append(card);
   });
 
-  // Jump to and flash the chosen chunk, if provided
   if(highlightChunkId){
     const el = document.getElementById(`chunk-${highlightChunkId}`);
     if(el){ el.scrollIntoView({behavior:"smooth",block:"start"}); el.classList.add("flash"); setTimeout(()=>el.classList.remove("flash"),1200); }
@@ -642,8 +694,7 @@ function renderToday(){
 $("#exportJson").addEventListener("click",()=>{
   const blob=new Blob([JSON.stringify(DB,null,2)],{type:"application/json"});
   const url=URL.createObjectURL(blob); const a=document.createElement("a");
-  a.href=url;
-  a.download=`mem_spaced_altgs_${todayYMD()}.json`; // CHANGED prefix to avoid collisions
+  a.href=url; a.download=`mem_spaced_altB_${todayYMD()}.json`;
   a.click(); URL.revokeObjectURL(url);
 });
 $("#importFile").addEventListener("change",(e)=>{
@@ -656,12 +707,37 @@ $("#addSubject").addEventListener("click",()=>{
   DB.subjects.push(createSubject(n)); $("#newSubject").value=""; save();
 });
 
-if(DB.subjects.length===0){
-  const s=createSubject("History");
-  const t=createTopic("President of India Timeline");
-  t.chunks.push(createChunk("C1"));
-  s.topics.push(t); DB.subjects.push(s); save();
-}else{renderAll();}
+/* ===== NEW: manual Sync / Pull buttons ===== */
+document.getElementById('syncNow').addEventListener('click', async ()=>{
+  try{ await PouchDB.replicate(localDB, remoteDB, { doc_ids:[STATE_DOC_ID] }); }catch(e){ console.error(e); }
+});
+document.getElementById('pullNow').addEventListener('click', async ()=>{
+  try{
+    await PouchDB.replicate(remoteDB, localDB, { doc_ids:[STATE_DOC_ID] });
+    const doc = await localDB.get(STATE_DOC_ID).catch(e=>null);
+    if(doc) await applyDocToApp(doc);
+  }catch(e){ console.error(e); }
+});
+
+/* ===== BOOT ===== */
+(async function(){
+  // Try remote first (so a clean browser restores itself)
+  await bootstrapRemoteFirst();
+
+  // If still empty, seed a starter example once (won't overwrite remote)
+  if((DB.subjects||[]).length===0){
+    const s=createSubject("History");
+    const t=createTopic("President of India Timeline");
+    t.chunks.push(createChunk("C1"));
+    s.topics.push(t); DB.subjects.push(s);
+    save(); // this will also create & push the state doc
+  }else{
+    renderAll();
+  }
+
+  // Begin live two-way sync
+  startLiveSync();
+})();
 </script>
 </body>
 </html>
